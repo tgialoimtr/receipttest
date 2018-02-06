@@ -1,22 +1,27 @@
 #!/usr/bin/env python
 
+import cv2
 from pylab import *
-# from numpy.ctypeslib import ndpointer
-# import argparse,os,os.path
 from scipy.ndimage import morphology
 from scipy.ndimage.filters import gaussian_filter,uniform_filter,maximum_filter, uniform_filter1d
 import ocrolib
-# from skimage.filters import threshold_sauvola
-# from numpy.fft import fft2, fftshift
+from skimage.filters import threshold_sauvola
 
-# from skimage.transform import radon
 from ocrolib import lstm, normalize_text
 from ocrolib import psegutils,morph,sl
 from ocrolib.toplevel import *
-# import web
-# import threading
 import time
 
+import threading
+
+# This is a placeholder for a Google-internal import.
+
+from grpc.beta import implementations
+import numpy as np
+import tensorflow as tf
+
+from tensorflow_serving.apis import predict_pb2
+from tensorflow_serving.apis import prediction_service_pb2
        
 class obj:
     def __init__(self):
@@ -38,7 +43,7 @@ args.hscale = 1.0
 args.threshold = 0.2
 args.pad = 3
 args.expand = 3
-args.model = '/root/ocrapp/models/receipt-model-460-700-00590000.pyrnn.gz'
+args.model = '/home/loitg/workspace/receipttest/model/receipt-model-460-700-00590000.pyrnn.gz'
 args.inputdir = '/root/ocrapp/tmp/cleanResult/'
 args.connect = 4
 args.noise = 8
@@ -47,7 +52,77 @@ args.noise = 8
 def summarize(a):
     b = a.ravel()
     return len(b),[amin(b),mean(b),amax(b)], percentile(b, [0,20,40,60,80,100])
+   
+def sauvola(grayimg, w=51, k=0.2, scaledown=None, reverse=False):
+    mask =None
+    if scaledown is not None:
+        mask = cv2.resize(grayimg,None,fx=scaledown,fy=scaledown)
+        w = int(w * scaledown)
+        if w % 2 == 0: w += 1
+        mask = threshold_sauvola(mask, w, k)
+        mask = cv2.resize(mask,(grayimg.shape[1],grayimg.shape[0]),fx=scaledown,fy=scaledown)
+    else:
+        if w % 2 == 0: w += 1
+        mask = threshold_sauvola(grayimg, w, k)
+    if reverse:
+        return where(grayimg > mask, uint8(0), uint8(1))
+    else:
+        return where(grayimg > mask, uint8(1), uint8(0)) 
+
+def estimate_skew_angle(image,angles):
+    estimates = []
+    binimage = sauvola(image, 11, 0.1).astype(float)
+    for a in angles:
+        rotM = cv2.getRotationMatrix2D((binimage.shape[1]/2,binimage.shape[0]/2),a,1)
+        rotated = cv2.warpAffine(binimage,rotM,(binimage.shape[1],binimage.shape[0]))
+        v = mean(rotated,axis=1)
+        d = [abs(v[i] - v[i-1]) for i in range(1,len(v))]
+        d = var(d)
+        estimates.append((d,a))
+#     if args.debug>0:
+#         plot([y for x,y in estimates],[x for x,y in estimates])
+#         ginput(1,args.debug)
+    _,a = max(estimates)
+    return a
+
+erc1 = cv2.text.loadClassifierNM1('/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifierNM1.xml')
+erc2 = cv2.text.loadClassifierNM2('/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifierNM2.xml')
+def findTextInImage(img):
     
+    tt = time.time()
+    channels = cv2.text.computeNMChannels(img)
+    print 'channel, ', time.time()-tt
+
+    
+#     cv2.Laplacian(temp, cv2.CV_64F).var()
+    vis = img.copy()
+    lines = []
+    for i,channel in enumerate(channels):
+        er1 = cv2.text.createERFilterNM1(erc1,60,0.000015,0.00013,0.5,True,0.1)
+        er2 = cv2.text.createERFilterNM2(erc2,0.5)
+        
+        regions = cv2.text.detectRegions(channel,er1,er2)
+        
+        i=0
+        for points in regions:
+            i +=1
+            cv2.fillConvexPoly(vis, points, (255*(i%3), 255*((i+1)%3), 255*((i+2)%3)))
+        
+        if len(regions) < 2:
+            continue
+        rects = cv2.text.erGrouping(img,channel,[r.tolist() for r in regions])
+#         rects = cv2.text.erGrouping(img,channel,[x.tolist() for x in regions], cv2.text.ERGROUPING_ORIENTATION_ANY,'/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifier_erGrouping.xml',0.2)
+        #Visualization
+        for r in range(0, shape(rects)[0]):
+            rect = rects[r]
+            cv2.rectangle(vis, (rect[0],rect[1]), (rect[0]+rect[2],rect[1]+rect[3]), (0, 0, 0), 2)
+            cv2.rectangle(vis, (rect[0],rect[1]), (rect[0]+rect[2],rect[1]+rect[3]), (255, 255, 255), 1)
+            if rect[2] > 15 and rect[3] > 15:
+                lines.append(img[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2], :])
+                
+    DSHOW("lineseeds",vis)
+    return vis
+
 
 def pre_check_line(line):
     project = mean(1-line, axis=0)
@@ -57,6 +132,18 @@ def pre_check_line(line):
         return True
     else:
         return False
+
+class TensorFlowPredictor:
+    def __init__(self):
+        pass
+
+    def predict_async(self, image, action):
+        request.inputs['images'].CopyFrom(
+            tf.contrib.util.make_tensor_proto(image))
+        request.inputs['width'].CopyFrom(
+            tf.contrib.util.make_tensor_proto(image.shape[1], shape=[1,1]))
+        return 'tensorflow'  
+     
 class Predictor:
     def __init__(self):
         self.network = ocrolib.load_object(args.model,verbose=1)
@@ -147,7 +234,7 @@ def compute_line_seeds(binaryary,bottom,top,scale):
             y1,s1 = transitions[l+1]
             if s1==0 and (y0-y1)<5*scale: seeds[y1:y0,x] = 1
     seeds = maximum_filter(seeds,(1,int(1+scale)))
-#     DSHOW("lineseeds",[seeds,0.3*tmarked+0.7*bmarked,binaryary])
+    DSHOW("lineseeds",[seeds,0.3*tmarked+0.7*bmarked,binaryary])
     return seeds
 
 
@@ -160,62 +247,48 @@ def spread_labels(labels,maxdist=9999999):
     spread *= (distances<maxdist)
     return spread
 
+@checks(ARANK(2),True,pad=int,expand=int,_=GRAYSCALE)
+def extract_line(image,linedesc,pad=5):
+    """Extract a subimage from the image using the line descriptor.
+    A line descriptor consists of bounds and a mask."""
+    y0,x0,y1,x1 = [int(x) for x in [linedesc.bounds[0].start,linedesc.bounds[1].start, \
+                  linedesc.bounds[0].stop,linedesc.bounds[1].stop]]
+    y0,x0,y1,x1 = (y0-pad,x0-pad,y1+pad,x1+pad)
+    h,w = image.shape
+    y0 = clip(y0,0,h)
+    y1 = clip(y1,0,h)
+    x0 = clip(x0,0,w)
+    x1 = clip(x1,0,w)
+    if y0 < y1 and x0 < x1:
+        return image[y0:y1, x0:x1]
+    else:
+        return None
+
 class PagePredictor:
     def __init__(self):
 #         self.lock = threading.Lock()
-        self.predictor = Predictor()
+        self.linepredictor = TensorFlowPredictor()
     def ocrImage(self, imgpath):
-        image = ocrolib.read_image_gray(imgpath)
         tt=time.time()
-    #     m = interpolation.zoom(image,args.zoom)
-    #     m = filters.percentile_filter(m,args.perc,size=(args.range,2))
-    #     m = filters.percentile_filter(m,args.perc,size=(2,args.range))
-    #     m = interpolation.zoom(m,1.0/args.zoom)
-    # #     if args.debug>0: imshow(m,vmin=0,vmax=1,cmap='gray'); ginput(timeout=-1)
-    #     w,h = minimum(array(image.shape),array(m.shape))
-    #     flat = clip(image[:w,:h]-m[:w,:h]+1,0,1)
-    # #     if args.debug>0: clf(); imshow(flat,vmin=0,vmax=1,cmap='gray'); ginput(timeout=-1)
-    # 
-    #     print 'flatten ', time.time() - tt
-    #     tt=time.time()
-    #             
-    #     temp = interpolation.zoom(flat,0.2)
-    # #             if args.debug>0: clf(); imshow(temp,vmin=0,vmax=1,cmap='gray'); ginput(1,-1)
-    #     fourier = fftshift(fft2(temp))
-    #     sh = log(1 + abs(fourier))
-    #     peak = amax(sh)
-    # #             if args.debug>0: clf(); imshow(sh,vmin=0,vmax=peak,cmap='gray'); ginput(1,-1)
-    # #             continue
-    #      
-    #     h, w = sh.shape
-    #     direction = np.empty(sh.shape)
-    #     ncount = 0.0
-    #     nsum = 0.0
-    #     for i in range(h):
-    #         for j in range(w):
-    #             ii = i - h/2
-    #             jj = j - w/2
-    #             if (abs(ii) < 6) & (abs(jj) < 6): continue
-    #             if sh[i,j] > 0.4* peak:
-    #                 direction = arctan2(-ii,jj)/3.14159*180.0
-    #                 if direction < 0:
-    #                     direction += 180.0
-    #                 if (direction < 100) & (direction > 80):
-    #                     ncount += abs(fourier[i,j])
-    #                     nsum += direction*abs(fourier[i,j])
-    #     if ncount != 0:
-    #         newangle = (90.0 - nsum/ncount)*float(h)/w
-    #         flat = interpolation.rotate(flat, newangle, cval=1.0)
-    # #         if args.debug>0: clf(); imshow(flat,vmin=0,vmax=1,cmap='gray'); ginput(1,-1)
-    #     mask = threshold_sauvola(flat, 9, 0.04)
-    #     binary = where(flat > mask, 0, 1)     
-    # 
-    #     print 'deskew and binarize ', time.time() - tt
-    #     tt=time.time()         
         
-        binary = where(image > 0.5, 0, 1)  
+        img_grey = ocrolib.read_image_gray(imgpath)
+        (h, w) = img_grey.shape[:2]
+        img00 = cv2.resize(img_grey[h/4:3*h/4,w/4:3*w/4],None,fx=0.5,fy=0.5)
+#             cv2.imshow('debug', img00)
+#             cv2.waitKey(-1)
+        angle = estimate_skew_angle(img00,linspace(-5,5,42))
+        print 'goc', angle
     
-        binaryary = morph.r_closing(binary.astype(bool), (args.connect,1))
+        rotM = cv2.getRotationMatrix2D((w/2,h/2),angle,1)
+        img_grey = cv2.warpAffine(img_grey,rotM,(w,h))
+#         cv2.imshow('debug', img_grey)
+#         cv2.waitKey(-1)
+        
+        h,w = img_grey.shape
+        img_grey = cv2.normalize(img_grey.astype(float32), None, 0.0, 0.99, cv2.NORM_MINMAX)
+        binary = sauvola(img_grey, w=128, k=0.2, scaledown=0.2, reverse=True)
+    
+        binaryary = morph.r_closing(binary[h/4:3*h/4,w/4:3*w/4].astype(bool), (args.connect,1))
         labels,n = morph.label(binaryary)
         objects = morph.find_objects(labels) ### <<<==== objects here
         bysize = sorted(objects,key=sl.area)
@@ -226,10 +299,16 @@ class PagePredictor:
         scale = median(scalemap[(scalemap>3)&(scalemap<100)]) ### <<<==== scale here
         
         bottom,top,boxmap = compute_gradmaps(binary,scale)
-    #         DSHOW('hihi', [bottom, top, binary])
+#         DSHOW('hihi', [bottom, top, binary])
         
         print 'boxmap,top,bottom ', time.time() - tt
         tt=time.time()
+#         img_color = (img_grey*255).astype(np.uint8)
+#         img_color = cv2.cvtColor(img_color, cv2.COLOR_GRAY2BGR)
+#         findTextInImage(img_color)
+#         
+#         print 'scenetext ', time.time() - tt
+#         tt=time.time()
         
     #         DSHOW("bottom-top-boxmap",[bottom,top,boxmap])
     #         if args.debug>0: clf(); imshow(binary,vmin=0,vmax=1,cmap='gray'); ginput(1,-1) 
@@ -243,18 +322,19 @@ class PagePredictor:
         binary = ocrolib.remove_noise(binary,args.noise)
         lines = psegutils.compute_lines(segmentation,scale)
         
-        print 'compute line ', time() - tt
-        tt=time()
+        print 'compute line ', time.time() - tt
+        tt=time.time()
     
     
         location_text = []
         for i,l in enumerate(lines):
-            binline = psegutils.extract_masked(1-binary,l,pad=args.pad,expand=args.expand)
-            if pre_check_line(binline):
-                pred = self.linepredictor.predict(binline)
+            binline = extract_line(img_grey,l,pad=args.pad)
+            if binline is None: continue
+            def action(pred):
                 result = psegutils.record(bounds = l.bounds, text=pred)
-                location_text.append(result)
-#             cv2.waitKey(999999)
+                location_text.append(result)               
+            self.linepredictor.predict_async(binline,action)
+
 
         for i, result in enumerate(location_text):
             if True: #len(result.text) < 8 and ('.' in result.text or '$' in result.text):
@@ -276,59 +356,17 @@ class PagePredictor:
         for i, result in enumerate(location_text): 
             if result is not None:   
                 ret += normalize_text(pred) + '\n'
-    #             ocrolib.write_text(args.outtext+str(i)+".txt",pred)
+    #             ocrolib.write_text(args.outtext+str(i)+".txt",pred)/home/loitg/Downloads/complex-bg
         return ret
-
-# print 'global'
-# predictors = []
-# if len(predictors) == 0:
-#     for i in range(16):
-#         print 'new predictor'
-#         predictors.append(PagePredictor())
-#                   
-# urls = (
-#     '/(.*)', 'miniocropus'
-# )
-# app = web.application(urls, globals())
-# 
-#     
-# 
-# class miniocropus:      
-#     def __init__(self):
-#         global predictors
-#         self.predictors = predictors
-#             
-#     def GET(self, name):
-#         if not name: 
-#             return ''
-#         else:
-#             i = 0
-#             while(True):
-#                 if not self.predictors[i].lock.locked():
-#                     self.predictors[i].lock.acquire()
-#                     ret = self.predictors[i].ocrImage(str(args.inputdir + name +'.png'))
-#                     self.predictors[i].lock.release()
-#                     return ret
-#                 else:
-#                     i += 1
-#                     i %= 16
-#                     time.sleep(0.05)
                     
                     
 if __name__ == "__main__":
-    ret = PagePredictor().ocrImage(str(args.inputdir + sys.argv[1] + '.png'))
-    with open(sys.argv[2], 'w') as outputfile:
-        outputfile.write(ret)
-#     print 'main'
-#     global predictors
-#     if len(predictors) == 0:
-#         for i in range(16):
-#             print 'new predictor'
-#             predictors.append(PagePredictor())
-#     app.run()
-#     print 'endmain'
-#     s = ocrImage(args.inputdir + '1503019474800.png')
-#     print s           
+    sys.argv = ['','/home/loitg/Downloads/complex-bg/1507607007955_49c4f2d9-b85d-43f6-b1e0-72c288d2af4d.JPG', '/home/loitg/temp.txt']
+    for filename in os.listdir('/home/loitg/Downloads/complex-bg/'):
+        if filename[-3:].upper() == 'JPG':
+            ret = PagePredictor().ocrImage('/home/loitg/Downloads/complex-bg/' + filename)
+            with open(sys.argv[2], 'w') as outputfile:
+                outputfile.write(ret)        
         
         
     
