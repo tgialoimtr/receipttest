@@ -373,13 +373,15 @@ class PagePredictor:
     
     
         location_text = []
+        line_list = []
         for i,l in enumerate(lines):
-            binline = extract_line(img_grey,l,pad=args.pad)
-            if binline is None: continue
-            def action(pred):
-                result = psegutils.record(bounds = l.bounds, text=pred)
-                location_text.append(result)               
-            self.linepredictor.predict_async(binline,action)
+            line = extract_line(img_grey,l,pad=args.pad)
+            line_list.append((line*255).astype(np.uint8))
+        
+        pred_dict = self.linepredictor.predict_batch(line_list)
+        for i,l in enumerate(lines):
+            result = psegutils.record(bounds = l.bounds, text=pred_dict[i])
+            location_text.append(result)
 
 
         for i, result in enumerate(location_text):
