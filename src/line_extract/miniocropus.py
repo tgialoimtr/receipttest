@@ -280,7 +280,7 @@ def compute_line_seeds(binaryary,bottom,top,scale):
             y1,s1 = transitions[l+1]
             if s1==0 and (y0-y1)<5*scale: seeds[y1:y0,x] = 1
     seeds = maximum_filter(seeds,(1,int(1+scale)))
-    DSHOW("lineseeds",[seeds,0.3*tmarked+0.7*bmarked,binaryary])
+    #DSHOW("lineseeds",[seeds,0.3*tmarked+0.7*bmarked,binaryary])
     return seeds
 
 
@@ -311,9 +311,9 @@ def extract_line(image,linedesc,pad=5):
         return None
 
 class PagePredictor:
-    def __init__(self):
+    def __init__(self, server_addr):
 #         self.lock = threading.Lock()
-        self.linepredictor = TensorFlowPredictor()
+        self.linepredictor = TensorFlowPredictor(server_addr)
     def ocrImage(self, imgpath):
         tt=time.time()
         
@@ -376,9 +376,12 @@ class PagePredictor:
         line_list = []
         for i,l in enumerate(lines):
             line = extract_line(img_grey,l,pad=args.pad)
+            newwidth = int(32.0/line.shape[0] * line.shape[1])
+            line = cv2.resize(line, (newwidth, 32))
             line_list.append((line*255).astype(np.uint8))
         
         pred_dict = self.linepredictor.predict_batch(line_list)
+        print(pred_dict)
         for i,l in enumerate(lines):
             result = psegutils.record(bounds = l.bounds, text=pred_dict[i])
             location_text.append(result)
@@ -403,18 +406,20 @@ class PagePredictor:
         ret = ''
         for i, result in enumerate(location_text): 
             if result is not None:   
-                ret += normalize_text(pred) + '\n'
+                ret += normalize_text(result.text) + '\n'
     #             ocrolib.write_text(args.outtext+str(i)+".txt",pred)/home/loitg/Downloads/complex-bg
         return ret
                     
                     
 if __name__ == "__main__":
-    sys.argv = ['','/home/loitg/Downloads/complex-bg/1507607007955_49c4f2d9-b85d-43f6-b1e0-72c288d2af4d.JPG', '/home/loitg/temp.txt']
-    for filename in os.listdir('/home/loitg/Downloads/complex-bg/'):
-        if filename[-3:].upper() == 'JPG':
-            ret = PagePredictor().ocrImage('/home/loitg/Downloads/complex-bg/' + filename)
-            with open(sys.argv[2], 'w') as outputfile:
-                outputfile.write(ret)        
-        
-        
-    
+#     sys.argv = ['','/home/loitg/Downloads/complex-bg/1507607007955_49c4f2d9-b85d-43f6-b1e0-72c288d2af4d.JPG', '/home/loitg/temp.txt']
+#     for filename in os.listdir('/home/loitg/Downloads/complex-bg/'):
+#         if filename[-3:].upper() == 'JPG':
+#             ret = PagePredictor().ocrImage('/home/loitg/Downloads/complex-bg/' + filename)
+#             with open(sys.argv[2], 'w') as outputfile:
+#                 outputfile.write(ret)        
+    tt = time.time() 
+    ret = PagePredictor(sys.argv[1]).ocrImage(sys.argv[2])
+    with open(sys.argv[3], 'w') as outputfile:
+        outputfile.write(ret)      
+    print(time.time() -tt)
