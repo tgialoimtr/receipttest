@@ -11,6 +11,7 @@ from ocrolib import lstm, normalize_text
 from ocrolib import psegutils,morph,sl
 from ocrolib.toplevel import *
 import time
+from time import sleep
 
 import threading
 
@@ -48,6 +49,11 @@ args.inputdir = '/root/ocrapp/tmp/cleanResult/'
 args.connect = 4
 args.noise = 8
 
+out_charset="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 `~!@#$%^&*()-=_+[]{};'\\:\"|,./<>?"
+def _get_string(labels):
+    """Transform an 1D array of labels into the corresponding character string"""
+    string = ''.join([out_charset[c] for c in labels])
+    return string
 
 def summarize(a):
     b = a.ravel()
@@ -85,43 +91,43 @@ def estimate_skew_angle(image,angles):
     _,a = max(estimates)
     return a
 
-erc1 = cv2.text.loadClassifierNM1('/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifierNM1.xml')
-erc2 = cv2.text.loadClassifierNM2('/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifierNM2.xml')
-def findTextInImage(img):
-    
-    tt = time.time()
-    channels = cv2.text.computeNMChannels(img)
-    print 'channel, ', time.time()-tt
-
-    
-#     cv2.Laplacian(temp, cv2.CV_64F).var()
-    vis = img.copy()
-    lines = []
-    for i,channel in enumerate(channels):
-        er1 = cv2.text.createERFilterNM1(erc1,60,0.000015,0.00013,0.5,True,0.1)
-        er2 = cv2.text.createERFilterNM2(erc2,0.5)
-        
-        regions = cv2.text.detectRegions(channel,er1,er2)
-        
-        i=0
-        for points in regions:
-            i +=1
-            cv2.fillConvexPoly(vis, points, (255*(i%3), 255*((i+1)%3), 255*((i+2)%3)))
-        
-        if len(regions) < 2:
-            continue
-        rects = cv2.text.erGrouping(img,channel,[r.tolist() for r in regions])
-#         rects = cv2.text.erGrouping(img,channel,[x.tolist() for x in regions], cv2.text.ERGROUPING_ORIENTATION_ANY,'/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifier_erGrouping.xml',0.2)
-        #Visualization
-        for r in range(0, shape(rects)[0]):
-            rect = rects[r]
-            cv2.rectangle(vis, (rect[0],rect[1]), (rect[0]+rect[2],rect[1]+rect[3]), (0, 0, 0), 2)
-            cv2.rectangle(vis, (rect[0],rect[1]), (rect[0]+rect[2],rect[1]+rect[3]), (255, 255, 255), 1)
-            if rect[2] > 15 and rect[3] > 15:
-                lines.append(img[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2], :])
-                
-    DSHOW("lineseeds",vis)
-    return vis
+# erc1 = cv2.text.loadClassifierNM1('/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifierNM1.xml')
+# erc2 = cv2.text.loadClassifierNM2('/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifierNM2.xml')
+# def findTextInImage(img):
+#     
+#     tt = time.time()
+#     channels = cv2.text.computeNMChannels(img)
+#     print 'channel, ', time.time()-tt
+# 
+#     
+# #     cv2.Laplacian(temp, cv2.CV_64F).var()
+#     vis = img.copy()
+#     lines = []
+#     for i,channel in enumerate(channels):
+#         er1 = cv2.text.createERFilterNM1(erc1,60,0.000015,0.00013,0.5,True,0.1)
+#         er2 = cv2.text.createERFilterNM2(erc2,0.5)
+#         
+#         regions = cv2.text.detectRegions(channel,er1,er2)
+#         
+#         i=0
+#         for points in regions:
+#             i +=1
+#             cv2.fillConvexPoly(vis, points, (255*(i%3), 255*((i+1)%3), 255*((i+2)%3)))
+#         
+#         if len(regions) < 2:
+#             continue
+#         rects = cv2.text.erGrouping(img,channel,[r.tolist() for r in regions])
+# #         rects = cv2.text.erGrouping(img,channel,[x.tolist() for x in regions], cv2.text.ERGROUPING_ORIENTATION_ANY,'/home/loitg/Downloads/opencv_contrib-3.2.0/modules/text/samples/trained_classifier_erGrouping.xml',0.2)
+#         #Visualization
+#         for r in range(0, shape(rects)[0]):
+#             rect = rects[r]
+#             cv2.rectangle(vis, (rect[0],rect[1]), (rect[0]+rect[2],rect[1]+rect[3]), (0, 0, 0), 2)
+#             cv2.rectangle(vis, (rect[0],rect[1]), (rect[0]+rect[2],rect[1]+rect[3]), (255, 255, 255), 1)
+#             if rect[2] > 15 and rect[3] > 15:
+#                 lines.append(img[rect[1]:rect[1]+rect[3], rect[0]:rect[0]+rect[2], :])
+#                 
+#     DSHOW("lineseeds",vis)
+#     return vis
 
 
 def pre_check_line(line):
@@ -133,16 +139,56 @@ def pre_check_line(line):
     else:
         return False
 
-class TensorFlowPredictor:
-    def __init__(self):
-        pass
-
-    def predict_async(self, image, action):
-        request.inputs['images'].CopyFrom(
-            tf.contrib.util.make_tensor_proto(image))
-        request.inputs['width'].CopyFrom(
-            tf.contrib.util.make_tensor_proto(image.shape[1], shape=[1,1]))
-        return 'tensorflow'  
+class TensorFlowPredictor(object):
+    def __init__(self, hostport):
+        self.host, self.port = hostport.split(':')
+        self.channel = implementations.insecure_channel(self.host, int(self.port))
+        self.stub = prediction_service_pb2.beta_create_PredictionService_stub(self.channel)
+    
+#         self._num_tests = num_tests
+#         self._concurrency = concurrency
+#         self._error = 0
+#         self._done = 0
+#         self._active = 0
+#         self._condition = threading.Condition()
+    
+    def inc_error(self):
+        with self._condition:
+            self._error += 1
+            
+    def predict_batch(self, image_list):
+        result = {}
+        for i, image in enumerate(image_list):
+            request = predict_pb2.PredictRequest()
+            request.model_spec.name = 'clreceipt'
+            request.model_spec.signature_name = tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY
+            request.inputs['images'].CopyFrom(
+                tf.contrib.util.make_tensor_proto(image, shape=image.shape))
+            request.inputs['width'].CopyFrom(
+            tf.contrib.util.make_tensor_proto(image.shape[1], shape=[]))
+            result_future = self.stub.Predict.future(request, 300.0)  # 10 secs timeout
+            
+            def _callback(result_future0, i=i):
+                exception = result_future0.exception()
+                if exception:
+    #                 self.error_count += 1
+                    print(exception)
+                else:
+                    sys.stdout.write(str(i))
+                    sys.stdout.flush()
+                    lobprobs = (numpy.array(result_future0.result().outputs['output0'].float_val))
+                    responses = []
+                    for j in range(1,4):
+                        responses.append(numpy.array(
+                            result_future0.result().outputs['output'+str(j)].int64_val))
+                        labels = _get_string(responses[-1])
+                    result[i] = labels
+            print('push ' + str(i))
+            result_future.add_done_callback(_callback)
+        while len(result) < len(image_list):
+            sleep(0.3)
+            print('wait')
+        return result
      
 class Predictor:
     def __init__(self):
