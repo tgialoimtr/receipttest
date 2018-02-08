@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-
+import sys
+sys.path += ['/usr/local/lib/python2.7/dist-packages/mininet-2.2.1-py2.7.egg', '/usr/lib/python2.7/dist-packages', '/usr/lib/python2.7', '/usr/lib/python2.7/plat-x86_64-linux-gnu', '/usr/lib/python2.7/lib-tk', '/usr/lib/python2.7/lib-old', '/usr/lib/python2.7/lib-dynload', '/home/loitg/.local/lib/python2.7/site-packages', '/usr/local/lib/python2.7/dist-packages', '/usr/lib/python2.7/dist-packages/PILcompat', '/usr/lib/python2.7/dist-packages/gtk-2.0']
 import cv2
 from pylab import *
 from scipy.ndimage import morphology
@@ -42,11 +43,11 @@ args.usegauss = False
 args.vscale = 1.0
 args.hscale = 1.0
 args.threshold = 0.2
-args.pad = 3
+args.pad = 1
 args.expand = 3
 args.model = '/home/loitg/workspace/receipttest/model/receipt-model-460-700-00590000.pyrnn.gz'
 args.inputdir = '/root/ocrapp/tmp/cleanResult/'
-args.connect = 4
+args.connect = 1
 args.noise = 8
 
 out_charset="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 `~!@#$%^&*()-=_+[]{};'\\:\"|,./<>?"
@@ -65,10 +66,12 @@ def sauvola(grayimg, w=51, k=0.2, scaledown=None, reverse=False):
         mask = cv2.resize(grayimg,None,fx=scaledown,fy=scaledown)
         w = int(w * scaledown)
         if w % 2 == 0: w += 1
+        if w == 1: w=3
         mask = threshold_sauvola(mask, w, k)
         mask = cv2.resize(mask,(grayimg.shape[1],grayimg.shape[0]),fx=scaledown,fy=scaledown)
     else:
         if w % 2 == 0: w += 1
+        if w == 1: w=3
         mask = threshold_sauvola(grayimg, w, k)
     if reverse:
         return where(grayimg > mask, uint8(0), uint8(1))
@@ -129,15 +132,33 @@ def estimate_skew_angle(image,angles):
 #     DSHOW("lineseeds",vis)
 #     return vis
 
+def calc_line(oriline):
+    line = sauvola(oriline,w=oriline.shape[0]/2, k=0.05, reverse=True)
+    oridense = '{:3.3f}'.format(mean(oriline))
+    dens = '{:3.3f}'.format(mean(line))
+#     rati = '{:3.3f}'.format(1.0*line.shape[1]/line.shape[0])
+    _,n = morph.label(line)
+    n = '{:3.3f}'.format(1.0*n/oriline.shape[1]*oriline.shape[0])
+    return dens+'_'+n+'_'+oridense, line
 
-def pre_check_line(line):
-    project = mean(1-line, axis=0)
-    project = uniform_filter1d(project, line.shape[0]/3)
-    m = mean(project)
-    if (m > 0.13) & (1.0*line.shape[1]/line.shape[0] > 1.7):
-        return True
-    else:
+def pre_check_line(oriline):
+    if oriline.shape[0] < 10:
         return False
+    if 1.0*oriline.shape[1]/oriline.shape[0] < 1.28:
+        return False
+    if mean(oriline) < 0.35:
+        return False
+    if oriline.shape[0] > 25:
+        line = sauvola(oriline,w=oriline.shape[0]*3/4, k=0.05, reverse=True, scaledown=20.0/oriline.shape[0])
+    else:
+        line = sauvola(oriline,w=oriline.shape[0]*3/4, k=0.05, reverse=True)
+    if mean(line) < 0.15:
+        return False
+    _,n = morph.label(line)
+    n = 1.0*n/oriline.shape[1]*oriline.shape[0]
+    if n > 15:
+        return False
+    return True
 
 class TensorFlowPredictor(object):
     def __init__(self, hostport):
@@ -229,10 +250,10 @@ def compute_boxmap(binary,scale,threshold=(.5,4),dtype='i'):
 #         if sl.area(o)**.5>threshold[1]*scale: continue
         if h > 5*scale: continue
 #         if h < 0.4*scale: continue
-        if w > 4*scale: continue
+        if w > 4*scale and (h > 2*scale or h < 0.5*scale): continue
         if a < 0.25*scale*scale: continue
         ratio = float(h)/w if h > w else float(w)/h
-        if ratio > 4: continue
+        if ratio > 10: continue
 #         if ratio < 2 and black > 0.8: continue
         boxmap[o] = 1
     return boxmap
@@ -240,6 +261,8 @@ def compute_boxmap(binary,scale,threshold=(.5,4),dtype='i'):
 def compute_gradmaps(binary,scale):
     # use gradient filtering to find baselines
     binaryary = morph.r_closing(binary.astype(bool), (args.connect,1))
+#     cv2.imshow('hihi', (binaryary*255).astype(uint8))
+#     cv2.waitKey(-1)
     boxmap = compute_boxmap(binaryary,scale)
     cleaned = boxmap*binaryary
     if args.usegauss:
@@ -280,7 +303,7 @@ def compute_line_seeds(binaryary,bottom,top,scale):
             y1,s1 = transitions[l+1]
             if s1==0 and (y0-y1)<5*scale: seeds[y1:y0,x] = 1
     seeds = maximum_filter(seeds,(1,int(1+scale)))
-    #DSHOW("lineseeds",[seeds,0.3*tmarked+0.7*bmarked,binaryary])
+#     DSHOW("lineseeds",[seeds,0.3*tmarked+0.7*bmarked,binaryary])
     return seeds
 
 
@@ -314,6 +337,7 @@ class PagePredictor:
     def __init__(self, server_addr):
 #         self.lock = threading.Lock()
         self.linepredictor = TensorFlowPredictor(server_addr)
+    
     def ocrImage(self, imgpath):
         tt=time.time()
         
@@ -331,8 +355,8 @@ class PagePredictor:
 #         cv2.waitKey(-1)
         
         h,w = img_grey.shape
-        img_grey = cv2.normalize(img_grey.astype(float32), None, 0.0, 0.99, cv2.NORM_MINMAX)
-        binary = sauvola(img_grey, w=128, k=0.2, scaledown=0.2, reverse=True)
+        img_grey = cv2.normalize(img_grey.astype(float32), None, 0.0, 0.999, cv2.NORM_MINMAX)
+        binary = sauvola(img_grey, w=50, k=0.05, scaledown=0.2, reverse=True)
     
         binaryary = morph.r_closing(binary[h/4:3*h/4,w/4:3*w/4].astype(bool), (args.connect,1))
         labels,n = morph.label(binaryary)
@@ -374,52 +398,78 @@ class PagePredictor:
     
         location_text = []
         line_list = []
+        bounds_list = []
         for i,l in enumerate(lines):
             line = extract_line(img_grey,l,pad=args.pad)
+#             hihi, sau = calc_line(line)
+            if not pre_check_line(line): continue
             newwidth = int(32.0/line.shape[0] * line.shape[1])
             line = cv2.resize(line, (newwidth, 32))
-            line_list.append((line*255).astype(np.uint8))
-        
+            line = (line*255).astype(np.uint8)
+            line_list.append(line)
+            bounds_list.append(l.bounds)
+            
+#             directory='/tmp/temp_hope/'+imgpath.split('/')[-1]
+#             print(directory)
+#             try:
+#                 os.stat(directory)
+#             except:
+#                 os.mkdir(directory) 
+#             cv2.imwrite(directory+'/'+ str(i) + '_' + hihi +'.JPG', line)
+#             cv2.imwrite(directory+'/'+ str(i) + '_' + hihi +'_sau.JPG', sau*255)
+#                
+#         return 'hihi'
         pred_dict = self.linepredictor.predict_batch(line_list)
         print(pred_dict)
-        for i,l in enumerate(lines):
-            result = psegutils.record(bounds = l.bounds, text=pred_dict[i])
+        for i in range(len(line_list)):
+            result = psegutils.record(bounds = bounds_list[i], text=pred_dict[i], available=True)
             location_text.append(result)
 
-
+        location_text.sort(key=lambda x: x.bounds[1].stop)
         for i, result in enumerate(location_text):
-            if True: #len(result.text) < 8 and ('.' in result.text or '$' in result.text):
+            if result.available:
                 linemap = []
-                for j, insertedline in enumerate(location_text):
-                    if (result.bounds[1].start > insertedline.bounds[1].stop):
-                        value = abs(result.bounds[0].stop - insertedline.bounds[0].stop)
-                        if value < 2*scale:
-                            linemap.append((value, insertedline))
+                for j in range(i, len(location_text)):
+                    if j==i: continue
+                    candidate = location_text[j]
+                    if not candidate.available: continue
+                    current_height = result.bounds[0].stop - result.bounds[0].start
+                    sameline = abs(result.bounds[0].stop - candidate.bounds[0].stop)
+                    rightness = candidate.bounds[1].start - result.bounds[1].stop
+                    if sameline < 0.5*current_height and rightness > -current_height:
+                        linemap.append((sameline**2 + rightness**2, candidate))
                 if len(linemap) > 0:
-                    j, preline = min(linemap)
-                    preline.text += (' ' + result.text)
-                    yy = slice(minimum(preline.bounds[0].start, result.bounds[0].start), maximum(preline.bounds[0].stop, result.bounds[0].stop))
-                    xx = slice(minimum(preline.bounds[1].start, result.bounds[1].start), maximum(preline.bounds[1].stop, result.bounds[1].stop))
-                    preline.bounds = (yy,xx)
-                    result = None
-            
+                    j, candidate = min(linemap)
+                    result.text += (' ' + candidate.text)
+                    yy = slice(minimum(candidate.bounds[0].start, result.bounds[0].start), maximum(candidate.bounds[0].stop, result.bounds[0].stop))
+                    xx = slice(minimum(candidate.bounds[1].start, result.bounds[1].start), maximum(candidate.bounds[1].stop, result.bounds[1].stop))
+                    result.bounds = (yy,xx)
+                    candidate.available = False
+        location_text.sort(key=lambda x: x.bounds[0].stop)   
         ret = ''
         for i, result in enumerate(location_text): 
-            if result is not None:   
+            if result.available:   
                 ret += normalize_text(result.text) + '\n'
     #             ocrolib.write_text(args.outtext+str(i)+".txt",pred)/home/loitg/Downloads/complex-bg
         return ret
                     
                     
 if __name__ == "__main__":
-#     sys.argv = ['','/home/loitg/Downloads/complex-bg/1507607007955_49c4f2d9-b85d-43f6-b1e0-72c288d2af4d.JPG', '/home/loitg/temp.txt']
-#     for filename in os.listdir('/home/loitg/Downloads/complex-bg/'):
-#         if filename[-3:].upper() == 'JPG':
-#             ret = PagePredictor().ocrImage('/home/loitg/Downloads/complex-bg/' + filename)
-#             with open(sys.argv[2], 'w') as outputfile:
-#                 outputfile.write(ret)        
-    tt = time.time() 
-    ret = PagePredictor(sys.argv[1]).ocrImage(sys.argv[2])
-    with open(sys.argv[3], 'w') as outputfile:
-        outputfile.write(ret)      
-    print(time.time() -tt)
+    import os
+    pp = PagePredictor('localhost:9000')
+    with open('/tmp/temp_hope/rs.txt', 'w') as rs:
+        for filename in os.listdir('/home/loitg/Downloads/complex-bg/'):        
+            if filename[-3:].upper() == 'JPG':
+                
+                tt = time.time()
+                ret = pp.ocrImage('/home/loitg/Downloads/complex-bg/' + filename)
+                rs.write(filename + '----------------' + str(time.time() - tt) + '\n')
+                rs.write(ret+ '\n')
+                rs.flush()
+
+       
+#     tt = time.time() 
+#     ret = PagePredictor(sys.argv[1]).ocrImage(sys.argv[2])
+#     with open(sys.argv[3], 'w') as outputfile:
+#         outputfile.write(ret)      
+#     print(time.time() -tt)
