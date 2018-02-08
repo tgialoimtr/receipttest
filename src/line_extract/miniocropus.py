@@ -426,9 +426,12 @@ class PagePredictor:
             location_text.append(result)
 
         location_text.sort(key=lambda x: x.bounds[1].stop)
-        for i, result in enumerate(location_text):
+        i = 0
+        while i < len(location_text):
+            result = location_text[i]
             if result.available:
                 linemap = []
+                
                 for j in range(i, len(location_text)):
                     if j==i: continue
                     candidate = location_text[j]
@@ -445,6 +448,14 @@ class PagePredictor:
                     xx = slice(minimum(candidate.bounds[1].start, result.bounds[1].start), maximum(candidate.bounds[1].stop, result.bounds[1].stop))
                     result.bounds = (yy,xx)
                     candidate.available = False
+                    continue
+                else:
+                    i+=1
+                    continue
+            else:
+                i+=1
+                continue       
+            
         location_text.sort(key=lambda x: x.bounds[0].stop)   
         ret = ''
         for i, result in enumerate(location_text): 
