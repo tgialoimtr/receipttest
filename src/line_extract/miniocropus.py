@@ -42,7 +42,7 @@ args.hi = 90
 args.usegauss = False
 args.vscale = 1.0
 args.hscale = 1.0
-args.threshold = 0.2
+args.threshold = 0.25
 args.pad = 1
 args.expand = 3
 args.model = '/home/loitg/workspace/receipttest/model/receipt-model-460-700-00590000.pyrnn.gz'
@@ -271,9 +271,9 @@ def compute_gradmaps(binary,scale):
                                             args.hscale*6*scale),order=(1,0))
     else:
         # this uses non-Gaussian oriented filters
-        grad = gaussian_filter(1.0*cleaned,(max(4,args.vscale*0.3*scale),
-                                            args.hscale*0.5*scale),order=(1,0))   # <====== originally 1
-        grad = uniform_filter(grad,(args.vscale,args.hscale*1*scale))   # <====== originally 6/35
+        grad = gaussian_filter(1.0*cleaned,(max(4,args.vscale*0.3*1.5*scale),
+                                            args.hscale*1*scale),order=(1,0))   # <====== originally 1
+        grad = uniform_filter(grad,(args.vscale,args.hscale*2*scale))   # <====== originally 6/35
     bottom = ocrolib.norm_max((grad<0)*(-grad))
     #bottom = minimum_filter(bottom,(0,10*scale))
     top = ocrolib.norm_max((grad>0)*grad)
